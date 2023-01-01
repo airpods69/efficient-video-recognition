@@ -3,6 +3,7 @@
 import argparse
 from datetime import datetime
 import builtins
+import math
 
 import torch
 import torch.distributed as dist
@@ -144,7 +145,7 @@ def main():
 
     batch_st, train_st = datetime.now(), datetime.now()
     for i, (data, labels) in enumerate(train_loader, resume_step):
-        print("start")
+        print(f"Data size: {data.size()}")
         data, labels = data.cuda(), labels.cuda()
         data_ed = datetime.now()
 
@@ -180,6 +181,10 @@ def main():
             dist.all_reduce(sync_tensor)
             sync_tensor = sync_tensor.cpu() / dist.get_world_size()
             loss_value, acc1, acc5 = sync_tensor.tolist()
+
+            if math.isnan(loss_value):
+                print("Loss is NaN now.")
+                break
 
             print(
                 f'batch_time: {(batch_ed - batch_st).total_seconds():.3f}  '
