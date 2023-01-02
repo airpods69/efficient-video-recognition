@@ -16,6 +16,7 @@ python -u -m torch.distributed.run --nproc_per_node 4 --master_port=29501 \
     --checkpoint_dir "${exp_dir}" \
     --auto_resume \
     --save_freq 500 \
+    --dummy_dataset \
     --train_list_path k400_train_updated.txt \
     --val_list_path k400_val_updated.txt \
     --batch_size 128 \

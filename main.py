@@ -211,7 +211,8 @@ def main():
                 flag = False
 
             if flag == False:
-                break
+                pass
+                # break
             
             loss_value += loss.item() / args.batch_split
             loss_scaler.scale(loss / args.batch_split).backward()
@@ -219,7 +220,7 @@ def main():
         if flag == False:
             # Avoiding loss to be nan and skipping if that happens
             print("Skipping because Loss is nan")
-            break
+            continue
 
         loss_scaler.step(optimizer)
         loss_scaler.update()
