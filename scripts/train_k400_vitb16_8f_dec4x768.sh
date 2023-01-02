@@ -3,7 +3,7 @@
 exp_dir=runs/k400_vitb16_8f_dec4x768
 
 mkdir -p "${exp_dir}"
-python -u -m torch.distributed.run --nproc_per_node 4 \
+python -u -m torch.distributed.run --nproc_per_node 4 --master_port=29501 \
   main.py \
     --num_steps 50000 \
     --backbone "ViT-B/16-lnpre" \
@@ -15,14 +15,16 @@ python -u -m torch.distributed.run --nproc_per_node 4 \
     --num_classes 400 \
     --checkpoint_dir "${exp_dir}" \
     --auto_resume \
+    --save_freq 500 \
     --train_list_path k400_train_updated.txt \
     --val_list_path k400_val_updated.txt \
     --batch_size 128 \
     --batch_split 1 \
+    --lr 4e-4 \
     --auto_augment rand-m7-n4-mstd0.5-inc1 \
     --mean 0.48145466 0.4578275 0.40821073 \
     --std 0.26862954 0.26130258 0.27577711 \
-    --num_workers 12 \
+    --num_workers 6 \
     --num_frames 8 \
     --sampling_rate 16 \
     --num_spatial_views 1 \

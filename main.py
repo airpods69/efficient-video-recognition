@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime
 import builtins
 import math
+from tqdm import tqdm
 
 import torch
 import torch.distributed as dist
@@ -15,6 +16,11 @@ from video_dataset import dataloader
 from weight_loaders import weight_loader_fn_dict
 from vision_transformer import vit_presets
 
+
+import wandb
+
+def check_tensor_nan(tensor):
+    return torch.isnan(tensor).any()
 
 def setup_print(is_master: bool):
     """
@@ -34,7 +40,7 @@ def setup_print(is_master: bool):
 
 def main():
     parser = argparse.ArgumentParser()
-    
+
     video_dataset.setup_arg_parser(parser)
     checkpoint.setup_arg_parser(parser)
 
@@ -44,9 +50,9 @@ def main():
                         help='run evaluation only')
     parser.add_argument('--save_freq', type=int, default=5000,
                         help='save a checkpoint every N steps')
-    parser.add_argument('--eval_freq', type=int, default=5000,
+    parser.add_argument('--eval_freq', type=int, default=1000,
                         help='evaluate every N steps')
-    parser.add_argument('--print_freq', type=int, default=10,
+    parser.add_argument('--print_freq', type=int, default=5,
                         help='print log message every N steps')
 
     parser.add_argument('--backbone', type=str, choices=vit_presets.keys(), default='ViT-B/16-lnpre',
@@ -77,7 +83,8 @@ def main():
                         help='disable temporal position embeddings added to frame features')
     parser.add_argument('--no_temporal_cross_attention', action='store_false', dest='temporal_cross_attention',
                         help='disable temporal cross attention on frame query and key features')
-    parser.set_defaults(temporal_conv=True, temporal_pos_embed=True, temporal_cross_attention=True)
+    parser.set_defaults(temporal_conv=True,
+                        temporal_pos_embed=True, temporal_cross_attention=True)
 
     parser.add_argument('--lr', type=float, default=4e-4,
                         help='learning rate')
@@ -93,6 +100,14 @@ def main():
 
     args = parser.parse_args()
 
+    wandb.init(project="efficient-video-recognition", group="looking for input fuckey", entity="airpods69")
+    wandb.config = {
+        "learning_rate": args.lr,
+        "epochs": args.num_steps,
+        "batch_size": args.batch_size,
+        "weight_decay": args.weight_decay
+    }
+
     dist.init_process_group('nccl')
     setup_print(dist.get_rank() == 0)
     cuda_device_id = dist.get_rank() % torch.cuda.device_count()
@@ -102,7 +117,8 @@ def main():
         backbone_name=args.backbone,
         backbone_type=args.backbone_type,
         backbone_path=args.backbone_path,
-        backbone_mode='finetune' if args.finetune_backbone else ('freeze_fp16' if args.fp16 else 'freeze_fp32'),
+        backbone_mode='finetune' if args.finetune_backbone else (
+            'freeze_fp16' if args.fp16 else 'freeze_fp32'),
         decoder_num_layers=args.decoder_num_layers,
         decoder_qkv_dim=args.decoder_qkv_dim,
         decoder_num_heads=args.decoder_num_heads,
@@ -120,13 +136,16 @@ def main():
     model = torch.nn.parallel.DistributedDataParallel(
         model, device_ids=[cuda_device_id], output_device=cuda_device_id,
     )
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_steps)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.num_steps)
     loss_scaler = torch.cuda.amp.grad_scaler.GradScaler(enabled=args.fp16)
     criterion = torch.nn.CrossEntropyLoss()
 
-    resume_step = checkpoint.resume_from_checkpoint(model, optimizer, lr_sched, loss_scaler, args)
+    resume_step = checkpoint.resume_from_checkpoint(
+        model, optimizer, lr_sched, loss_scaler, args)
 
     val_loader = video_dataset.create_val_loader(args)
     if args.eval_only:
@@ -136,39 +155,72 @@ def main():
         return
     else:
         assert args.train_list_path is not None, 'Train list path must be specified if not in eval_only mode.'
-        train_loader = video_dataset.create_train_loader(args, resume_step=resume_step)
+        train_loader = video_dataset.create_train_loader(
+            args, resume_step=resume_step)
 
     # assert len(train_loader) == args.num_steps - resume_step
     # print('Start model evaluation at step')
     # model.eval()
     # evaluate(model, val_loader)
 
+    count = 0  # To count the print number
+
     batch_st, train_st = datetime.now(), datetime.now()
     for i, (data, labels) in enumerate(train_loader, resume_step):
-        print(f"Data size: {data.size()}")
+        count += 1
         data, labels = data.cuda(), labels.cuda()
         data_ed = datetime.now()
 
         optimizer.zero_grad()
 
         assert data.size(0) % args.batch_split == 0
-        split_size = data.size(0) // args.batch_split # split_size = 32
+        split_size = data.size(0) // args.batch_split  # split_size = 32
         hit1, hit5, loss_value = 0, 0, 0
         for j in range(args.batch_split):
+            flag = True
             data_slice = data[split_size * j: split_size * (j + 1)]
             labels_slice = labels[split_size * j: split_size * (j + 1)]
 
             with torch.cuda.amp.autocast(args.fp16):
                 logits = model(data_slice)
                 loss = criterion(logits, labels_slice)
-                
-            if labels.dtype == torch.long: # no mixup, can calculate accuracy
-                hit1 += (logits.topk(1, dim=1)[1] == labels_slice.view(-1, 1)).sum().item()
-                hit5 += (logits.topk(5, dim=1)[1] == labels_slice.view(-1, 1)).sum().item()
-            loss_value += loss.item() / args.batch_split
+
+
+            if labels.dtype == torch.long:  # no mixup, can calculate accuracy
+                hit1 += (logits.topk(1, dim=1)
+                         [1] == labels_slice.view(-1, 1)).sum().item()
+                hit5 += (logits.topk(5, dim=1)
+                         [1] == labels_slice.view(-1, 1)).sum().item()
             
+
+            # Checking for NaN
+            if check_tensor_nan(data_slice):
+                print("Data_slice/Input is the reason?")
+                flag = False
+
+            if check_tensor_nan(labels_slice):
+                print("Labels_slice/Input is the reason?")
+                flag = False
+
+            if check_tensor_nan(logits):
+                print("Model has a problem and it spits out NaN")
+                flag = False
+            
+            if math.isnan(loss_value):
+                print("Loss Function fucked up, might have to change")
+                flag = False
+
+            if flag == False:
+                break
+            
+            loss_value += loss.item() / args.batch_split
             loss_scaler.scale(loss / args.batch_split).backward()
-        
+
+        if flag == False:
+            # Avoiding loss to be nan and skipping if that happens
+            print("Skipping because Loss is nan")
+            break
+
         loss_scaler.step(optimizer)
         loss_scaler.update()
         optimizer.step()
@@ -177,16 +229,22 @@ def main():
         batch_ed = datetime.now()
 
         if i % args.print_freq == 0:
-            sync_tensor = torch.Tensor([loss_value, hit1 / data.size(0), hit5 / data.size(0)]).cuda()
+            sync_tensor = torch.Tensor(
+                [loss_value, hit1 / data.size(0), hit5 / data.size(0)]).cuda()
             dist.all_reduce(sync_tensor)
             sync_tensor = sync_tensor.cpu() / dist.get_world_size()
             loss_value, acc1, acc5 = sync_tensor.tolist()
 
-            if math.isnan(loss_value):
-                print("Loss is NaN now.")
-                break
+            wandb.log({
+                "Top 1 Accuracy": acc1 * 100,
+                "Top 5 Accuracy": acc5 * 100,
+                "Loss": loss_value,
+                "Learning Rate": optimizer.param_groups[0]["lr"]
+            })
+            wandb.watch(model)
 
             print(
+                f'{count}. '
                 f'batch_time: {(batch_ed - batch_st).total_seconds():.3f}  '
                 f'data_time: {(data_ed - batch_st).total_seconds():.3f}  '
                 f'ETA: {(batch_ed - train_st) / (i - resume_step + 1) * (args.num_steps - i - 1)}  |  '
@@ -195,7 +253,11 @@ def main():
                     f'  acc1: {acc1 * 100:.2f}%  acc5: {acc5 * 100:.2f}%' if labels.dtype == torch.long else ''
                 )
             )
-        
+
+            if math.isnan(loss_value):
+                print("Loss is NaN now.")
+                break
+
         if (i + 1) % args.eval_freq == 0:
             print('Start model evaluation at step', i + 1)
             model.eval()
@@ -203,8 +265,9 @@ def main():
             model.train()
 
         if (i + 1) % args.save_freq == 0:
-            checkpoint.save_checkpoint(model, optimizer, lr_sched, loss_scaler, i + 1, args)
-        
+            checkpoint.save_checkpoint(
+                model, optimizer, lr_sched, loss_scaler, i + 1, args)
+
         batch_st = datetime.now()
 
 
@@ -215,7 +278,7 @@ def evaluate(model: torch.nn.Module, loader: torch.utils.data.DataLoader):
         data, labels = data.cuda(), labels.cuda()
         assert data.size(0) == 1
         if data.ndim == 6:
-            data = data[0] # now the first dimension is number of views
+            data = data[0]  # now the first dimension is number of views
 
         with torch.no_grad():
             logits = model(data)
@@ -235,7 +298,9 @@ def evaluate(model: torch.nn.Module, loader: torch.utils.data.DataLoader):
     dist.all_reduce(sync_tensor)
     tot, hit1, hit5 = sync_tensor.cpu().tolist()
 
-    print(f'Accuracy on validation set: top1={hit1 / tot * 100:.2f}%, top5={hit5 / tot * 100:.2f}%')
+    print(
+        f'Accuracy on validation set: top1={hit1 / tot * 100:.2f}%, top5={hit5 / tot * 100:.2f}%')
 
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    main()
