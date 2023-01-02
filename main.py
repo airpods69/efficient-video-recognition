@@ -38,28 +38,6 @@ def setup_print(is_master: bool):
 
     builtins.print = print
 
-def save_model(model, count):
-    """
-    This function is for saving the weights of i-1 and i model while running (and delete the previous ones)
-    Doing this to return to the previous model whenever loss turns to NaN
-    Models saved to weights_save
-    """
-
-    path = "weights_save"
-    models_dir = os.listdir(path)
-
-    if count % 2:
-        # if 2 models exist then remove the older one and rename the newer one to older one
-        if "checkpoint_0.pt" in models_dir:
-            os.system("rm weights_save/checkpoint_0.pt")
-            os.system("mv weights_save/checkpoint_1.pt weights_save/checkpoint_0.pt")
-
-    if models_dir == []: # no new model
-        torch.save(model.state_dict(), "checkpoint_0.pt")
-
-    else:
-        torch.save(model.state_dict(), "checkpoint_1.pt")
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -165,7 +143,7 @@ def main():
 
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.num_steps)
-        
+
     loss_scaler = torch.cuda.amp.grad_scaler.GradScaler(enabled=args.fp16)
     criterion = torch.nn.CrossEntropyLoss()
 
