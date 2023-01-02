@@ -5,6 +5,7 @@ from datetime import datetime
 import builtins
 import math
 from tqdm import tqdm
+import os
 
 import torch
 import torch.distributed as dist
@@ -36,6 +37,28 @@ def setup_print(is_master: bool):
             builtin_print(*args, **kwargs)
 
     builtins.print = print
+
+def save_model(model, count):
+    """
+    This function is for saving the weights of i-1 and i model while running (and delete the previous ones)
+    Doing this to return to the previous model whenever loss turns to NaN
+    Models saved to weights_save
+    """
+
+    path = "weights_save"
+    models_dir = os.listdir(path)
+
+    if count % 2:
+        # if 2 models exist then remove the older one and rename the newer one to older one
+        if "checkpoint_0.pt" in models_dir:
+            os.system("rm weights_save/checkpoint_0.pt")
+            os.system("mv weights_save/checkpoint_1.pt weights_save/checkpoint_0.pt")
+
+    if models_dir == []: # no new model
+        torch.save(model.state_dict(), "checkpoint_0.pt")
+
+    else:
+        torch.save(model.state_dict(), "checkpoint_1.pt")
 
 
 def main():
@@ -139,8 +162,10 @@ def main():
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.num_steps)
+        
     loss_scaler = torch.cuda.amp.grad_scaler.GradScaler(enabled=args.fp16)
     criterion = torch.nn.CrossEntropyLoss()
 
@@ -166,6 +191,8 @@ def main():
     count = 0  # To count the print number
 
     batch_st, train_st = datetime.now(), datetime.now()
+
+
     for i, (data, labels) in enumerate(train_loader, resume_step):
         count += 1
         data, labels = data.cuda(), labels.cuda()
@@ -219,7 +246,12 @@ def main():
 
         if flag == False:
             # Avoiding loss to be nan and skipping if that happens
-            print("Skipping because Loss is nan")
+            print("Going back to previous weights because Loss is nan")
+            model.load_state_dict(torch.load("weights_save/checkpoint_0.pt"))
+            model.cuda()
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, device_ids=[cuda_device_id], output_device=cuda_device_id,
+            )
             continue
 
         loss_scaler.step(optimizer)
@@ -259,15 +291,15 @@ def main():
                 print("Loss is NaN now.")
                 break
 
+        if (i + 1) % args.save_freq == 0:
+            checkpoint.save_checkpoint(
+                model, optimizer, lr_sched, loss_scaler, i + 1, args)
+
         if (i + 1) % args.eval_freq == 0:
             print('Start model evaluation at step', i + 1)
             model.eval()
             evaluate(model, val_loader)
             model.train()
-
-        if (i + 1) % args.save_freq == 0:
-            checkpoint.save_checkpoint(
-                model, optimizer, lr_sched, loss_scaler, i + 1, args)
 
         batch_st = datetime.now()
 
