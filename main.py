@@ -38,7 +38,6 @@ def setup_print(is_master: bool):
 
     builtins.print = print
 
-
 def main():
     parser = argparse.ArgumentParser()
 
@@ -49,6 +48,9 @@ def main():
                         help='number of training steps')
     parser.add_argument('--eval_only', action='store_true',
                         help='run evaluation only')
+    parser.add_argument('--start_eval', action='store_true',
+                        help='Run Evaluation at start')
+
     parser.add_argument('--save_freq', type=int, default=5000,
                         help='save a checkpoint every N steps')
     parser.add_argument('--eval_freq', type=int, default=1000,
@@ -98,6 +100,11 @@ def main():
     parser.add_argument('--batch_split', type=int, default=1,
                         help='optionally split the batch into smaller shards and forward/backward one shard '
                              'at a time to avoid out-of-memory error.')
+
+    parser.add_argument('--grad_clip', type=float, default=6,
+                        help='Gradient clipping value to avoid exploding gradients')
+
+    
 
     args = parser.parse_args()
 
@@ -166,13 +173,13 @@ def main():
     # model.eval()
     # evaluate(model, val_loader)
 
-    count = 0  # To count the print number
+    count = args.count  # To count the print number
 
     batch_st, train_st = datetime.now(), datetime.now()
 
 
     for i, (data, labels) in enumerate(train_loader, resume_step):
-        count += 1
+
         data, labels = data.cuda(), labels.cuda()
         data_ed = datetime.now()
 
@@ -222,18 +229,9 @@ def main():
             loss_value += loss.item() / args.batch_split
             loss_scaler.scale(loss / args.batch_split).backward()
 
-        if flag == False:
-            # Avoiding loss to be nan and skipping if that happens
-            print("Going back to previous weights because Loss is nan")
-            model.load_state_dict(torch.load("weights_save/checkpoint_0.pt"))
-            model.cuda()
-            model = torch.nn.parallel.DistributedDataParallel(
-                model, device_ids=[cuda_device_id], output_device=cuda_device_id,
-            )
-            continue
-
         loss_scaler.step(optimizer)
         loss_scaler.update()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
         lr_sched.step()
 
@@ -255,7 +253,7 @@ def main():
             wandb.watch(model)
 
             print(
-                f'{count}. '
+                f'{i}. '
                 f'batch_time: {(batch_ed - batch_st).total_seconds():.3f}  '
                 f'data_time: {(data_ed - batch_st).total_seconds():.3f}  '
                 f'ETA: {(batch_ed - train_st) / (i - resume_step + 1) * (args.num_steps - i - 1)}  |  '
@@ -270,13 +268,16 @@ def main():
                 break
 
         if (i + 1) % args.save_freq == 0:
+            print(f"Saving model at {count + i + 1}")
             checkpoint.save_checkpoint(
-                model, optimizer, lr_sched, loss_scaler, i + 1, args)
+                model, optimizer, lr_sched, loss_scaler, count + i + 1, args)
 
-        if (i + 1) % args.eval_freq == 0:
+        if (i + 1) % args.eval_freq == 0 or args.start_eval:
             print('Start model evaluation at step', i + 1)
+            val_loader = video_dataset.create_val_loader(args) # new evaluation loader/dataset for every eval step
             model.eval()
             evaluate(model, val_loader)
+            args.start_eval = False
             model.train()
 
         batch_st = datetime.now()

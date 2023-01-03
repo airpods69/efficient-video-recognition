@@ -7,6 +7,8 @@ import io
 import numpy as np
 import glob
 
+import random
+
 import torch
 from torchvision import transforms
 
@@ -41,7 +43,11 @@ class VideoDataset(torch.utils.data.Dataset):
             self.num_spatial_views = num_spatial_views
 
         with open(list_path) as f:
+
+            sample_num = random.randint(1500,2000)
+
             self.data_list = f.read().splitlines()
+            self.data_list = random.sample(self.data_list, sample_num)
 
 
     def __len__(self):

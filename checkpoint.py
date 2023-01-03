@@ -7,6 +7,8 @@ import torch
 import torch.distributed as dist
 
 def setup_arg_parser(parser: argparse.ArgumentParser):
+    parser.add_argument('--count', type=int,
+                        help='To Maintain the number of epochs trained and to avoid any confusion in future')
     parser.add_argument('--checkpoint_dir', type=str,
                         help='checkpoint output path')
     parser.add_argument('--auto_resume', action='store_true',
@@ -36,10 +38,14 @@ def _find_autoresume_path(args: argparse.Namespace):
 
     if len(checkpoint_iters) == 0:
         print('Did not find a valid checkpoint file.')
+        args.count = 0
     else:
         checkpoint_iters.sort()
         args.resume_path = os.path.join(args.checkpoint_dir, 'checkpoint-%d.pth' % checkpoint_iters[-1])
         print(f'Found {len(checkpoint_iters)} checkpoint file(s).')
+        args.count = checkpoint_iters[-1] + 1
+
+
 
 
 def resume_from_checkpoint(
